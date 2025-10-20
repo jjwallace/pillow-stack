@@ -4,6 +4,7 @@ import { GAME_CONFIG } from "./config"
 export class GameScene extends Phaser.Scene {
   private ducks!: Phaser.GameObjects.Group
   private clouds!: Phaser.GameObjects.Group
+  private horizonClouds!: Phaser.GameObjects.Group
   private floorTiles: Phaser.GameObjects.Image[] = []
   private balloon!: Phaser.GameObjects.Image
   private disk!: Phaser.GameObjects.Image
@@ -48,6 +49,7 @@ export class GameScene extends Phaser.Scene {
   private pillowLoweringStartTime = 0 // Start time for easing calculation
   private pillowLoweringDuration = 800 // Duration in milliseconds
   private restartButton!: Phaser.GameObjects.Text
+  private worldY = 0 // World vertical offset - everything is positioned relative to ground
 
   constructor() {
     super({ key: "GameScene" })
@@ -87,9 +89,11 @@ export class GameScene extends Phaser.Scene {
     // Create grass row (top row) - moved up by 10 pixels for better pillow alignment
     for (let i = 0; i < tilesWide; i++) {
       const x = startX + (i * tileSize)
-      const grassTile = this.add.image(x, floorStartY - 10, "spritesheet-nature", grassFrameIndex)
+      const baseY = floorStartY - 10
+      const grassTile = this.add.image(x, baseY, "spritesheet-nature", grassFrameIndex)
       grassTile.setOrigin(0, 0)
       grassTile.setDepth(-1)
+      grassTile.setData('baseY', baseY) // Store base position for worldY updates
       this.floorTiles.push(grassTile)
     }
 
@@ -97,9 +101,11 @@ export class GameScene extends Phaser.Scene {
     for (let y = 1; y <= GAME_CONFIG.floor.earthRows; y++) {
       for (let i = 0; i < tilesWide; i++) {
         const x = startX + (i * tileSize)
-        const earthTile = this.add.image(x, floorStartY - 10 + (y * tileSize), "spritesheet-nature", earthFrameIndex)
+        const baseY = floorStartY - 10 + (y * tileSize)
+        const earthTile = this.add.image(x, baseY, "spritesheet-nature", earthFrameIndex)
         earthTile.setOrigin(0, 0)
         earthTile.setDepth(-1)
+        earthTile.setData('baseY', baseY) // Store base position for worldY updates
         this.floorTiles.push(earthTile)
       }
     }
@@ -165,6 +171,10 @@ export class GameScene extends Phaser.Scene {
 
     this.cameras.main.setBackgroundColor(0x4eadf5)
 
+    // Reset world offset and lives on restart
+    this.worldY = 0
+    this.pillowLives = 5
+
     // Create floor tiles
     this.createFloorTiles()
 
@@ -172,8 +182,17 @@ export class GameScene extends Phaser.Scene {
       runChildUpdate: true,
     })
 
+    this.horizonClouds = this.add.group({
+      runChildUpdate: true,
+    })
+
     for (let i = 0; i < 30; i++) {
       this.spawnCloud()
+    }
+
+    // Spawn 50 horizon clouds
+    for (let i = 0; i < 50; i++) {
+      this.spawnHorizonCloud()
     }
 
     // Set pivot point at ground level for tower sway
@@ -492,7 +511,7 @@ export class GameScene extends Phaser.Scene {
     const newPillowHeight = GAME_CONFIG.pillow.minHeight // Starting height
 
     if (this.pillowStack.length === 0) {
-      targetY = this.getGroundLevel() - 80 // Hover above the ground
+      targetY = this.getGroundLevel() - 80 - this.worldY // Hover above the ground, adjusted for worldY
     } else {
       const topPillow = this.pillowStack[this.pillowStack.length - 1]
       const topPillowHeight = this.pillowHeights[this.pillowHeights.length - 1]
@@ -540,7 +559,7 @@ export class GameScene extends Phaser.Scene {
   checkPillowLanding() {
     if (!this.floatingPillow || !this.isDropping) return
 
-    const groundLevel = this.getGroundLevel() - 5 // Just above the ground
+    const groundLevel = this.getGroundLevel() - 5 - this.worldY // Just above the ground, adjusted for worldY
 
     // Check if landing on ground (empty stack) or on top pillow
     let landingY: number
@@ -722,8 +741,8 @@ export class GameScene extends Phaser.Scene {
 
     const combinedAngle = this.towerSwayAngle
 
-    // Calculate ground level
-    const groundLevel = this.getGroundLevel() - 5
+    // Calculate ground level with worldY offset
+    const groundLevel = this.getGroundLevel() - 5 - this.worldY
 
     for (let i = 0; i < this.pillowStack.length; i++) {
       const pillow = this.pillowStack[i]
@@ -755,15 +774,17 @@ export class GameScene extends Phaser.Scene {
 
       const baseY = groundLevel - stackHeight
 
-      // Apply rotation around pivot point
-      const relativeX = baseX - this.pivotPoint.x
-      const relativeY = baseY - this.pivotPoint.y
+      // Apply rotation around pivot point (also adjusted for worldY)
+      const pivotX = this.pivotPoint.x
+      const pivotY = this.pivotPoint.y - this.worldY
+      const relativeX = baseX - pivotX
+      const relativeY = baseY - pivotY
 
       const rotatedX = relativeX * Math.cos(combinedAngle) - relativeY * Math.sin(combinedAngle)
       const rotatedY = relativeX * Math.sin(combinedAngle) + relativeY * Math.cos(combinedAngle)
 
-      pillow.x = rotatedX + this.pivotPoint.x
-      pillow.y = rotatedY + this.pivotPoint.y
+      pillow.x = rotatedX + pivotX
+      pillow.y = rotatedY + pivotY
 
       pillow.rotation = combinedAngle
     }
@@ -776,19 +797,67 @@ export class GameScene extends Phaser.Scene {
     const cloudNumber = Phaser.Math.Between(1, 8)
     const cloudKey = `cloud${cloudNumber}`
 
-    const x = Phaser.Math.Between(0, width)
-    const y = Phaser.Math.Between(50, height - 100)
+    // Spawn on either side of viewport
+    const spawnOnLeft = Math.random() < 0.5
+    const x = spawnOnLeft ? -100 : width + 100
 
-    const cloud = this.add.image(x, y, cloudKey)
+    // Random Y position in screen space
+    const screenY = Phaser.Math.Between(50, height - 150)
+
+    // Convert to world space (ground-relative)
+    const groundLevel = this.getGroundLevel()
+    const worldY = groundLevel - screenY + this.worldY
+
+    const cloud = this.add.image(x, screenY, cloudKey)
     cloud.setScale(0.1)
     cloud.setAlpha(0.7)
     cloud.setDepth(-2)
 
+    // Store ground-relative position
+    cloud.setData('groundY', worldY)
+    cloud.setData('baseSpeed', Phaser.Math.Between(10, 25))
+
     this.physics.add.existing(cloud)
     const body = cloud.body as Phaser.Physics.Arcade.Body
-    body.setVelocityX(-Phaser.Math.Between(10, 25))
+
+    // Set initial velocity based on spawn side
+    const speed = cloud.getData('baseSpeed')
+    body.setVelocityX(spawnOnLeft ? speed : -speed)
 
     this.clouds.add(cloud)
+  }
+
+  spawnHorizonCloud() {
+    const width = this.cameras.main.width
+
+    const cloudNumber = Phaser.Math.Between(1, 8)
+    const cloudKey = `cloud${cloudNumber}`
+
+    // Random X position across screen
+    const x = Phaser.Math.Between(0, width)
+
+    // Position 100px above viewport with random offset (-25 to +25)
+    const horizonOffset = Phaser.Math.Between(-25, 25)
+    const screenY = -100 + horizonOffset
+
+    // Convert to world space (ground-relative)
+    const groundLevel = this.getGroundLevel()
+    const worldY = groundLevel - screenY + this.worldY
+
+    const cloud = this.add.image(x, screenY, cloudKey)
+    cloud.setScale(0.1)
+    cloud.setAlpha(0.8)
+    cloud.setDepth(10) // In front of pillows
+
+    // Store ground-relative position
+    cloud.setData('groundY', worldY)
+    cloud.setData('horizonOffset', horizonOffset)
+
+    this.physics.add.existing(cloud)
+    const body = cloud.body as Phaser.Physics.Arcade.Body
+    body.setVelocityX(-Phaser.Math.Between(30, 40)) // Faster than regular clouds
+
+    this.horizonClouds.add(cloud)
   }
 
   createFeatherExplosion(x: number, y: number) {
@@ -911,21 +980,31 @@ export class GameScene extends Phaser.Scene {
     const spawnOnLeft = Math.random() < 0.5
 
     const x = spawnOnLeft ? -50 : width + 50
-    const y = Phaser.Math.Between(100, height - 100)
 
-    const duck = this.add.sprite(x, y, "spritesheet")
+    // Random Y position in screen space
+    const screenY = Phaser.Math.Between(100, height - 150)
+
+    // Convert to world space (ground-relative)
+    const groundLevel = this.getGroundLevel()
+    const worldY = groundLevel - screenY + this.worldY
+
+    const duck = this.add.sprite(x, screenY, "spritesheet")
     duck.setScale(1)
     duck.play("fly")
     duck.setDepth(0)
 
+    // Store ground-relative position
+    duck.setData('groundY', worldY)
+
+    this.physics.add.existing(duck)
+    const body = duck.body as Phaser.Physics.Arcade.Body
+
     if (spawnOnLeft) {
       duck.setFlipX(false)
-      this.physics.add.existing(duck)
-      ;(duck.body as Phaser.Physics.Arcade.Body).setVelocityX(150)
+      body.setVelocityX(150)
     } else {
       duck.setFlipX(true)
-      this.physics.add.existing(duck)
-      ;(duck.body as Phaser.Physics.Arcade.Body).setVelocityX(-150)
+      body.setVelocityX(-150)
     }
 
     this.ducks.add(duck)
@@ -939,6 +1018,27 @@ export class GameScene extends Phaser.Scene {
       this.createFloorTiles()
       this.pivotPoint.y = this.getGroundLevel()
     }
+
+    // Calculate if pillow stack has reached center and should start moving up
+    if (this.pillowStack.length > 0) {
+      const topPillow = this.pillowStack[this.pillowStack.length - 1]
+      const screenCenterY = this.cameras.main.height / 2
+
+      // If top pillow is above screen center, move world down (camera up)
+      if (topPillow.y < screenCenterY) {
+        const targetWorldY = this.worldY + (screenCenterY - topPillow.y) * 0.1
+        this.worldY = targetWorldY
+      }
+    }
+
+    // Update floor tiles position based on worldY
+    const groundLevel = this.getGroundLevel()
+    this.floorTiles.forEach(tile => {
+      const baseY = tile.getData('baseY')
+      if (baseY !== undefined) {
+        tile.y = baseY - this.worldY
+      }
+    })
 
     // Check collision BEFORE applying movement to prevent overshooting
     this.checkPillowLanding()
@@ -962,11 +1062,19 @@ export class GameScene extends Phaser.Scene {
 
     this.updatePillowSway()
 
+    // Update ducks with ground-relative positioning
+    const width = this.cameras.main.width
     this.ducks.children.entries.forEach((child) => {
       const duck = child as Phaser.GameObjects.Sprite
       const body = duck.body as Phaser.Physics.Arcade.Body
-      const width = this.cameras.main.width
 
+      // Update screen position from ground-relative position
+      const groundY = duck.getData('groundY')
+      if (groundY !== undefined) {
+        duck.y = groundLevel - groundY + this.worldY
+      }
+
+      // Wrap around screen horizontally
       if (duck.x > width + 50) {
         duck.x = -50
         duck.setFlipX(false)
@@ -986,12 +1094,56 @@ export class GameScene extends Phaser.Scene {
       }
     })
 
+    // Update background clouds with ground-relative positioning and speed based on height
     this.clouds.children.entries.forEach((child) => {
       const cloud = child as Phaser.GameObjects.Image
-      if (cloud.x > this.cameras.main.width + 200) {
+      const body = cloud.body as Phaser.Physics.Arcade.Body
+
+      // Update screen position from ground-relative position
+      const groundY = cloud.getData('groundY')
+      if (groundY !== undefined) {
+        cloud.y = groundLevel - groundY + this.worldY
+      }
+
+      // Increase speed based on height (worldY)
+      const baseSpeed = cloud.getData('baseSpeed') || 15
+      const heightMultiplier = 1 + (this.worldY / 500) // Speed increases as we go higher
+      const currentSpeed = baseSpeed * heightMultiplier
+      body.setVelocityX(body.velocity.x < 0 ? -currentSpeed : currentSpeed)
+
+      // Wrap around screen horizontally
+      if (cloud.x > width + 200) {
         cloud.x = -200
       } else if (cloud.x < -200) {
-        cloud.x = this.cameras.main.width + 200
+        cloud.x = width + 200
+      }
+
+      // Respawn if too far off screen vertically
+      if (cloud.y > this.cameras.main.height + 200 || cloud.y < -400) {
+        cloud.destroy()
+      }
+    })
+
+    // Update horizon clouds with ground-relative positioning
+    this.horizonClouds.children.entries.forEach((child) => {
+      const cloud = child as Phaser.GameObjects.Image
+      const body = cloud.body as Phaser.Physics.Arcade.Body
+
+      // Update screen position to stay 100px above viewport with stored offset
+      const horizonOffset = cloud.getData('horizonOffset') || 0
+      cloud.y = -100 + horizonOffset
+
+      // Increase speed based on height
+      const heightMultiplier = 1 + (this.worldY / 400)
+      const currentSpeed = Phaser.Math.Between(30, 40) * heightMultiplier
+      body.setVelocityX(-currentSpeed)
+
+      // Wrap around screen horizontally
+      if (cloud.x < -200) {
+        cloud.x = width + 200
+        // Randomize offset on wrap
+        const newOffset = Phaser.Math.Between(-25, 25)
+        cloud.setData('horizonOffset', newOffset)
       }
     })
 
